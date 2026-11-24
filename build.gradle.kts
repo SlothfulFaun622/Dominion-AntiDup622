@@ -1,0 +1,154 @@
+import io.papermc.hangarpublishplugin.model.Platforms
+
+plugins {
+    id("java")
+    id("com.gradleup.shadow") version "9.0.0-beta4"
+    id("io.papermc.hangar-publish-plugin") version "0.1.2"
+    id("io.papermc.paperweight.userdev") version "2.0.0-beta.21" apply false
+}
+
+var buildFull = properties["BuildFull"].toString() == "true"
+var libraries = listOf<String>()
+libraries += "org.postgresql:postgresql:42.7.2"
+libraries += "com.mysql:mysql-connector-j:8.4.0"
+libraries += "org.mariadb.jdbc:mariadb-java-client:3.5.3"
+libraries += "org.xerial:sqlite-jdbc:3.46.1.3"
+libraries += "net.kyori:adventure-platform-bukkit:4.3.3"
+libraries += "com.zaxxer:HikariCP:6.2.1"
+libraries += "org.mybatis:mybatis:3.5.16"
+libraries += "org.flywaydb:flyway-core:11.8.2"
+libraries += "org.flywaydb:flyway-database-postgresql:11.8.2"
+libraries += "org.flywaydb:flyway-mysql:11.8.2"
+libraries += "net.kyori:adventure-text-minimessage:4.22.0"
+
+// AntiDup622 fork: fixed release version, no git based suffix increment
+group = "cn.lunadeer"
+version = "4.8.4"
+
+java {
+    toolchain.languageVersion.set(JavaLanguageVersion.of(17))
+}
+
+// utf-8
+tasks.withType<JavaCompile> {
+    options.encoding = "UTF-8"
+}
+
+allprojects {
+    apply(plugin = "java")
+    apply(plugin = "com.gradleup.shadow")
+
+    repositories {
+        mavenLocal()
+        mavenCentral()
+        maven("https://oss.sonatype.org/content/groups/public")
+        maven("https://repo.papermc.io/repository/maven-public/")
+        maven("https://jitpack.io")
+    }
+
+    dependencies {
+        if (!buildFull) {
+            libraries.forEach {
+                compileOnly(it)
+            }
+        } else {
+            libraries.forEach {
+                implementation(it)
+            }
+        }
+    }
+
+    tasks.processResources {
+        outputs.upToDateWhen { false }
+        // copy languages folder from PROJECT_DIR/languages to core/src/main/resources
+        from(file("${projectDir}/languages")) {
+            into("languages")
+        }
+        // replace @version@ in plugin.yml with project version
+        filesMatching("**/plugin.yml") {
+            filter {
+                it.replace("@version@", rootProject.version.toString())
+            }
+            if (!buildFull) {
+                var libs = "libraries: ["
+                libraries.forEach {
+                    libs += "$it,"
+                }
+                filter {
+                    it.replace("libraries: [ ]", libs.substring(0, libs.length - 1) + "]")
+                }
+            }
+        }
+    }
+
+    tasks.shadowJar {
+        archiveClassifier.set("")
+        archiveVersion.set(project.version.toString())
+        dependsOn(tasks.withType<ProcessResources>())
+        mergeServiceFiles()
+        // add -lite to the end of the file name if BuildLite is true or -full if BuildLite is false
+        archiveFileName.set("${project.name}-${project.version}${if (buildFull) "-full" else "-lite"}.jar")
+    }
+}
+
+dependencies {
+    implementation(project(":core"))
+    implementation(project("versions:v1_20_1"))
+    implementation(project("versions:v1_21"))
+    implementation(project("versions:v1_21_4"))
+    implementation(project("versions:v1_21_6"))
+    implementation(project("versions:v1_21_8"))
+    implementation(project("versions:v1_21_9"))
+    implementation(project("versions:v26"))
+}
+
+// Reobfuscate all subproject JARs that have paperweight reobfJar task
+val reobfAllJars = tasks.register("reobfAllJars") {
+    description = "Reobfuscate all subproject JARs with paperweight (skip if task doesn't exist)"
+    group = "build"
+}
+
+subprojects {
+    afterEvaluate {
+        tasks.findByName("reobfJar")?.let { reobfTask ->
+            reobfAllJars.configure {
+                dependsOn(reobfTask)
+            }
+        }
+    }
+}
+
+tasks.shadowJar {
+    archiveClassifier.set("")
+    archiveVersion.set(project.version.toString())
+    // Ensure all NMS modules are reobfuscated before assembling the final JAR
+    dependsOn(reobfAllJars)
+    archiveFileName.set("Dominion-${project.version}${if (buildFull) "-full" else "-lite"}-AntiDup622.jar")
+}
+
+tasks.register("Clean&Build") { // <<<< RUN THIS TASK TO BUILD PLUGIN
+    dependsOn(tasks.clean)
+    dependsOn(tasks.shadowJar)
+}
+
+hangarPublish {
+    publications.register("plugin") {
+        version.set(project.version as String) // use project version as publication version
+        id.set("Dominion")
+        channel.set("Beta")
+        changelog.set("See https://github.com/ColdeZhang/Dominion/releases/tag/v${project.version}")
+        apiKey.set(System.getenv("HANGAR_TOKEN"))
+        // register platforms
+        platforms {
+            register(Platforms.PAPER) {
+                jar.set(tasks.shadowJar.flatMap { it.archiveFile })
+                println("ShadowJar: ${tasks.shadowJar.flatMap { it.archiveFile }}")
+                platformVersions.set(listOf("1.20.1-1.20.6", "1.21.x", "26.1.2"))
+            }
+        }
+    }
+}
+
+tasks.named("publishPluginPublicationToHangar") {
+    dependsOn(tasks.named("jar"))
+}
